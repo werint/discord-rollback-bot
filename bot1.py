@@ -8,6 +8,10 @@ import io
 import re
 import random
 import string
+import asyncio
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('disnake')
 intents = disnake.Intents.default()
 intents.members = True
 intents.message_content = True
