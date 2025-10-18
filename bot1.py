@@ -16,7 +16,7 @@ intents = disnake.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-DATA_FILE = "rollback_data.json"
+DATA_FILE = "/data/rollback_data.json"
 STATIC_CHANNEL_ID = 1429128623776075916
 ADMIN_IDS = [
     1381084245321056438,  
