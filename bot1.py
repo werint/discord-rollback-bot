@@ -52,9 +52,12 @@ def load_data(guild_id):
 def save_data(guild_id, data):
     """Сохраняет данные для конкретного сервера"""
     data_file = get_data_file(guild_id)
-     directory = os.path.dirname(data_file)
+    
+    # Автоматически создаем папку если нужно
+    directory = os.path.dirname(data_file)
     if directory and not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
+    
     with open(data_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
