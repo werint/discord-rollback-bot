@@ -20,13 +20,13 @@ SERVER_CONFIGS = {
     1429544000188317831: {
         "static_channel_id": 1429831404379705474,
         "admin_role_ids": [1310673963000528949, 1223589384452833290, 1429544345463296000],
-        "data_file": "/data/rollback_data_server1.json"
+        "data_file": "rollback_data_server1.json"
     },
     # Второй сервер (из bot1.py)
     1003525677640851496: {
         "static_channel_id": 1429128623776075916,
         "admin_ids": [1381084245321056438, 427922282959077386, 300627668460634124, 773983223595139083, 415145467702280192],
-        "data_file": "/data/rollback_data.json"
+        "data_file": "rollback_data.json"
     }
 }
 
@@ -52,6 +52,9 @@ def load_data(guild_id):
 def save_data(guild_id, data):
     """Сохраняет данные для конкретного сервера"""
     data_file = get_data_file(guild_id)
+     directory = os.path.dirname(data_file)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
     with open(data_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
