@@ -714,7 +714,7 @@ class MainView(disnake.ui.View):
         else:
             await inter.response.send_modal(RollbackModal(self.list_id, self.guild_id, has_existing_rollback=False))
     
-     @disnake.ui.button(label="Обновить список", style=disnake.ButtonStyle.secondary)
+    @disnake.ui.button(label="Обновить список", style=disnake.ButtonStyle.secondary)
     async def refresh_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         await inter.response.defer(ephemeral=True)
         list_data = await get_list(self.list_id, self.guild_id)
