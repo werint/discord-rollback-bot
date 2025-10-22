@@ -16,56 +16,37 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# Конфигурация для разных серверов
 SERVER_CONFIGS = {
-    # Первый сервер
     1429544000188317831: {
         "static_channel_id": 1429831404379705474,
         "admin_role_ids": [1310673963000528949, 1223589384452833290, 1429544345463296000],
     },
-    # Второй сервер
     1003525677640851496: {
         "static_channel_id": 1429128623776075916,
         "admin_ids": [1381084245321056438, 427922282959077386, 300627668460634124, 773983223595139083, 415145467702280192],
     }
 }
 
-# Подключение к базе данных
 class Database:
     def __init__(self):
         self.pool = None
     
     async def get_database_url(self):
-        """Получает URL базы данных из переменных окружения"""
         database_url = os.getenv('DATABASE_URL')
         if database_url:
-            print("✅ DATABASE_URL найден")
             return database_url
-            
         database_url = os.getenv('POSTGRES_URL')
         if database_url:
-            print("✅ POSTGRES_URL найден")
             return database_url
-            
         database_url = os.getenv('POSTGRESQL_URL')
         if database_url:
-            print("✅ POSTGRESQL_URL найден")
             return database_url
-            
-        print("🔍 Доступные переменные окружения:")
-        for key, value in os.environ.items():
-            if any(db_key in key.lower() for db_key in ['database', 'postgres', 'pg']):
-                print(f"   {key}: {value[:50]}...")
-        
         return None
     
     async def connect(self):
-        """Подключение к PostgreSQL"""
         database_url = await self.get_database_url()
         if not database_url:
-            raise Exception("❌ DATABASE_URL не найден в переменных окружения!")
-        
-        print(f"🔗 Подключаемся к базе данных...")
+            raise Exception("DATABASE_URL не найден!")
         
         if database_url.startswith('postgres://'):
             database_url = database_url.replace('postgres://', 'postgresql://', 1)
@@ -84,7 +65,6 @@ class Database:
             raise
     
     async def init_tables(self):
-        """Инициализация таблиц"""
         try:
             await self.pool.execute('''
                 CREATE TABLE IF NOT EXISTS lists (
@@ -131,15 +111,12 @@ class Database:
 
 db = Database()
 
-# Глобальная переменная для хранения активных списков
 active_lists = {}
 
 def get_server_config(guild_id):
-    """Получает конфигурацию для сервера"""
     return SERVER_CONFIGS.get(guild_id)
 
 def is_admin(member):
-    """Проверяет, имеет ли пользователь права администратора"""
     if not member:
         return False
     
@@ -147,14 +124,12 @@ def is_admin(member):
     if not config:
         return False
     
-    # Для первого сервера проверяем по ролям
     if member.guild.id == 1429544000188317831:
         try:
             member_role_ids = [role.id for role in member.roles]
             return any(role_id in config["admin_role_ids"] for role_id in member_role_ids)
         except:
             return False
-    # Для второго сервера проверяем по ID пользователей
     elif member.guild.id == 1003525677640851496:
         try:
             return member.id in config["admin_ids"]
@@ -164,11 +139,9 @@ def is_admin(member):
     return False
 
 def generate_list_id():
-    """Генерирует случайный ID из 5 символов"""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
 
 async def create_new_list(list_id, list_name, channel_id, created_by, guild_id):
-    """Создает новый список для указанного сервера"""
     config = get_server_config(guild_id)
     static_channel_id = config["static_channel_id"] if config else channel_id
     
@@ -188,24 +161,20 @@ async def create_new_list(list_id, list_name, channel_id, created_by, guild_id):
         "rollbacks": {}
     }
     
-    # Добавляем в активные списки для авто-обновления
     active_lists[list_id] = list_data
     
     return list_data
 
 async def get_list(list_id, guild_id, update_active=True):
-    """Получает список по ID для указанного сервера"""
     row = await db.pool.fetchrow('''
         SELECT * FROM lists WHERE id = $1 AND guild_id = $2
     ''', list_id, guild_id)
     
     if not row:
-        # Если список не найден, удаляем из активных
         if list_id in active_lists:
             del active_lists[list_id]
         return None
     
-    # Получаем участников
     participants_rows = await db.pool.fetch('''
         SELECT * FROM participants WHERE list_id = $1
     ''', list_id)
@@ -218,7 +187,6 @@ async def get_list(list_id, guild_id, update_active=True):
             "registered_at": p['registered_at'].isoformat()
         }
     
-    # Получаем откаты
     rollbacks_rows = await db.pool.fetch('''
         SELECT * FROM rollbacks WHERE list_id = $1
     ''', list_id)
@@ -246,14 +214,12 @@ async def get_list(list_id, guild_id, update_active=True):
         "rollbacks": rollbacks
     }
     
-    # Обновляем в активных списках
     if update_active:
         active_lists[list_id] = list_data
     
     return list_data
 
 async def remove_user_rollback(list_data, user_id):
-    """Удаляет откат пользователя"""
     await db.pool.execute('''
         DELETE FROM rollbacks WHERE list_id = $1 AND user_id = $2
     ''', list_data["id"], user_id)
@@ -266,7 +232,6 @@ async def remove_user_rollback(list_data, user_id):
     return True
 
 def clean_rollback_text(text):
-    """Очищает текст отката от форматирования"""
     if not text:
         return ""
     
@@ -277,7 +242,6 @@ def clean_rollback_text(text):
     return clean_text
 
 async def update_status_message(list_data):
-    """Обновляет сообщение со статусом откатов в СТАТИЧЕСКОМ канале"""
     try:
         config = get_server_config(list_data["guild_id"])
         if not config:
@@ -288,13 +252,10 @@ async def update_status_message(list_data):
         if not channel:
             return
         
-        # Получаем актуальные данные из базы (ВКЛЮЧАЯ участников)
         list_data = await get_list(list_data["id"], list_data["guild_id"], update_active=True)
         if not list_data:
             return
         
-        # Остальной код без изменений...
-        # Формируем содержимое сообщения
         total_participants = len(list_data['participants'])
         completed_rollbacks = sum(1 for p in list_data['participants'].values() if p['has_rollback'])
         
@@ -327,7 +288,6 @@ async def update_status_message(list_data):
                             message_content += f"  └ 📝 {rollback_preview}\n"
                 message_content += "\n"
         
-        # Проверяем, есть ли уже сообщение со статусом
         status_message_id = list_data.get("status_message_id")
         
         if status_message_id:
@@ -338,7 +298,6 @@ async def update_status_message(list_data):
             except:
                 pass
         
-        # Создаём новое сообщение
         new_message = await channel.send(message_content)
         
         await db.pool.execute('''
@@ -349,11 +308,9 @@ async def update_status_message(list_data):
         print(f"Ошибка при обновлении статуса списка {list_data['id']}: {e}")
 
 async def update_participants_message(channel, list_data):
-    """Обновляет сообщение со списком участников и кнопками в канале списка"""
     if not list_data:
         return
     
-    # Получаем актуальные данные из базы (ВКЛЮЧАЯ участников)
     list_data = await get_list(list_data["id"], list_data["guild_id"], update_active=True)
     if not list_data:
         return
@@ -374,7 +331,6 @@ async def update_participants_message(channel, list_data):
         except:
             pass
     
-    # Создаём новое сообщение
     embed = disnake.Embed(
         title=f"📋 {list_data['name']}",
         description=await generate_participants_list(list_data),
@@ -407,85 +363,39 @@ async def generate_participants_list(list_data):
     
     return "\n".join(lines)
 
-# Задача для автоматического обновления
-async def update_status_message(list_data):
-    """Обновляет сообщение со статусом откатов в СТАТИЧЕСКОМ канале"""
+@tasks.loop(seconds=30)
+async def auto_update_lists():
     try:
-        config = get_server_config(list_data["guild_id"])
-        if not config:
-            return
-            
-        channel_id = config["static_channel_id"]
-        channel = bot.get_channel(channel_id)
-        if not channel:
-            return
+        print(f"🔄 Авто-обновление списков... ({len(active_lists)} активных списков)")
         
-        # Получаем актуальные данные из базы (ВКЛЮЧАЯ участников)
-        list_data = await get_list(list_data["id"], list_data["guild_id"], update_active=True)
-        if not list_data:
-            return
-        
-        # Остальной код без изменений...
-        # Формируем содержимое сообщения
-        total_participants = len(list_data['participants'])
-        completed_rollbacks = sum(1 for p in list_data['participants'].values() if p['has_rollback'])
-        
-        message_content = f"📊 **СТАТУС ОТКАТОВ: {list_data['name']}**\n\n"
-        message_content += f"📋 ID списка: `{list_data['id']}`\n"
-        message_content += f"👥 Всего участников: **{total_participants}**\n"
-        message_content += f"✅ Отправили откат: **{completed_rollbacks}** / **{total_participants}**\n"
-        message_content += f"{'='*50}\n\n"
-        
-        if not list_data['participants']:
-            message_content += "*Список участников пуст*\n"
-        else:
-            for user_id, participant in sorted(list_data['participants'].items(), key=lambda x: x[1]['registered_at']):
-                status = "🟢" if participant['has_rollback'] else "🔴"
-                username = participant['display_name']
-                message_content += f"{status} **{username}**\n"
-                
-                if participant['has_rollback']:
-                    user_rollback = None
-                    for rollback in list_data['rollbacks'].values():
-                        if rollback['user_id'] == user_id:
-                            user_rollback = rollback
-                            break
-                    if user_rollback:
-                        rollback_text = user_rollback['text']
-                        if rollback_text:
-                            rollback_preview = rollback_text[:150]
-                            if len(rollback_text) > 150:
-                                rollback_preview += "..."
-                            message_content += f"  └ 📝 {rollback_preview}\n"
-                message_content += "\n"
-        
-        # Проверяем, есть ли уже сообщение со статусом
-        status_message_id = list_data.get("status_message_id")
-        
-        if status_message_id:
+        for list_id, list_data in list(active_lists.items()):
             try:
-                status_message = await channel.fetch_message(status_message_id)
-                await status_message.edit(content=message_content)
-                return
-            except:
-                pass
+                current_list_data = await get_list(list_id, list_data["guild_id"], update_active=True)
+                if not current_list_data:
+                    del active_lists[list_id]
+                    continue
+                
+                channel = bot.get_channel(current_list_data["channel_id"])
+                if channel:
+                    await update_participants_message(channel, current_list_data)
+                
+                await update_status_message(current_list_data)
+                
+                print(f"✅ Обновлен список: {list_id} (участников: {len(current_list_data['participants'])}, откатов: {len(current_list_data['rollbacks'])})")
+                
+            except Exception as e:
+                print(f"❌ Ошибка при авто-обновлении списка {list_id}: {e}")
         
-        # Создаём новое сообщение
-        new_message = await channel.send(message_content)
-        
-        await db.pool.execute('''
-            UPDATE lists SET status_message_id = $1 WHERE id = $2
-        ''', new_message.id, list_data["id"])
+        print(f"✅ Авто-обновление завершено")
         
     except Exception as e:
-        print(f"Ошибка при обновлении статуса списка {list_data['id']}: {e}")
+        print(f"❌ Критическая ошибка в auto_update_lists: {e}")
 
 @bot.event
 async def on_ready():
     print(f'Bot {bot.user} готов к работе!')
     print(f'Подключен к {len(bot.guilds)} серверам')
     
-    # Загружаем все существующие списки в активные
     try:
         for guild in bot.guilds:
             rows = await db.pool.fetch('SELECT id FROM lists WHERE guild_id = $1', guild.id)
@@ -497,7 +407,6 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Ошибка при загрузке активных списков: {e}")
     
-    # Запускаем авто-обновление
     auto_update_lists.start()
     print("✅ Авто-обновление списков запущено (каждые 30 секунд)")
     print("✅ Бот запущен и готов к работе!")
@@ -616,7 +525,6 @@ class RollbackModal(disnake.ui.Modal):
             
         rollback_text = inter.text_values["rollback_text"]
         
-        # Очищаем текст от форматирования
         cleaned_text = clean_rollback_text(rollback_text)
         
         if not cleaned_text:
@@ -626,14 +534,11 @@ class RollbackModal(disnake.ui.Modal):
             )
             return
         
-        # Обновляем серверный никнейм участника
         server_nickname = inter.author.display_name
         
-        # Удаляем старый откат, если он есть
         if self.has_existing_rollback:
             await remove_user_rollback(list_data, user_id)
         
-        # Добавляем новый откат
         await db.pool.execute('''
             INSERT INTO rollbacks (user_id, list_id, user_name, text)
             VALUES ($1, $2, $3, $4)
@@ -641,7 +546,6 @@ class RollbackModal(disnake.ui.Modal):
             DO UPDATE SET user_name = $3, text = $4, timestamp = NOW()
         ''', user_id, self.list_id, server_nickname, cleaned_text)
         
-        # Обновляем статус участника
         await db.pool.execute('''
             UPDATE participants SET has_rollback = TRUE, display_name = $3
             WHERE user_id = $1 AND list_id = $2
@@ -654,7 +558,6 @@ class RollbackModal(disnake.ui.Modal):
             
         await inter.response.send_message(message, ephemeral=True)
         
-        # Обновляем сообщения
         channel = bot.get_channel(list_data["channel_id"])
         if channel:
             await update_participants_message(channel, list_data)
@@ -683,14 +586,12 @@ class DeleteRollbackView(disnake.ui.View):
             await inter.response.send_message("❌ У вас нет отправленного отката!", ephemeral=True)
             return
         
-        # Удаляем откат
         if await remove_user_rollback(list_data, user_id):
             await inter.response.send_message(
                 f"✅ Ваш откат удален из списка '{list_data['name']}'!", 
                 ephemeral=True
             )
             
-            # Обновляем сообщения
             channel = bot.get_channel(list_data["channel_id"])
             if channel:
                 await update_participants_message(channel, list_data)
@@ -698,7 +599,6 @@ class DeleteRollbackView(disnake.ui.View):
         else:
             await inter.response.send_message("❌ Не удалось удалить откат!", ephemeral=True)
         
-        # Удаляем кнопки после использования
         await inter.message.delete()
     
     @disnake.ui.button(label="Отмена", style=disnake.ButtonStyle.secondary)
@@ -727,7 +627,6 @@ class MainView(disnake.ui.View):
             )
             return
         
-        # Проверяем, есть ли уже откат у пользователя
         has_existing_rollback = list_data["participants"][user_id]["has_rollback"]
         
         if has_existing_rollback:
@@ -801,7 +700,6 @@ async def register_user(
         await inter.response.send_message("❌ Список с таким ID не найден!", ephemeral=True)
         return
     
-    # Парсинг пользователей из строки
     user_mentions = re.findall(r'<@!?(\d+)>', users)
     user_ids = re.findall(r'\b(\d{17,19})\b', users)
     
@@ -822,7 +720,6 @@ async def register_user(
             
             server_nickname = member.display_name
             
-            # Проверяем, зарегистрирован ли уже
             existing = await db.pool.fetchrow(
                 'SELECT 1 FROM participants WHERE user_id = $1 AND list_id = $2',
                 user_id, list_id
@@ -848,7 +745,6 @@ async def register_user(
         
         await inter.response.send_message("\n".join(response), ephemeral=True)
         
-        # Обновляем сообщения
         channel = bot.get_channel(list_data["channel_id"])
         if channel:
             await update_participants_message(channel, list_data)
@@ -898,7 +794,6 @@ async def remove_user(
     
     user_id = str(user.id)
     
-    # Проверяем, зарегистрирован ли пользователь
     existing = await db.pool.fetchrow(
         'SELECT 1 FROM participants WHERE user_id = $1 AND list_id = $2',
         user_id, list_id
@@ -908,17 +803,14 @@ async def remove_user(
         await inter.response.send_message("❌ Пользователь не зарегистрирован в этом списке!", ephemeral=True)
         return
     
-    # Получаем серверный никнейм
     member = inter.guild.get_member(user.id)
     server_nickname = member.display_name if member else user.display_name
     
-    # Удаляем пользователя и его откат
     await db.pool.execute('DELETE FROM participants WHERE user_id = $1 AND list_id = $2', user_id, list_id)
     await db.pool.execute('DELETE FROM rollbacks WHERE user_id = $1 AND list_id = $2', user_id, list_id)
     
     await inter.response.send_message(f"✅ Пользователь {server_nickname} удален из списка '{list_data['name']}'!", ephemeral=True)
     
-    # Обновляем сообщения
     channel = bot.get_channel(list_data["channel_id"])
     if channel:
         await update_participants_message(channel, list_data)
@@ -938,10 +830,8 @@ async def delete_list(
         await inter.response.send_message("❌ Список с таким ID не найден!", ephemeral=True)
         return
     
-    # Удаляем список (каскадно удалятся участники и откаты)
     await db.pool.execute('DELETE FROM lists WHERE id = $1', list_id)
     
-    # Удаляем из активных списков
     if list_id in active_lists:
         del active_lists[list_id]
     
@@ -961,17 +851,14 @@ async def reset_rollbacks(
         await inter.response.send_message("❌ Список с таким ID не найден!", ephemeral=True)
         return
     
-    # Сбрасываем статус откатов у всех участников
     await db.pool.execute('''
         UPDATE participants SET has_rollback = FALSE WHERE list_id = $1
     ''', list_id)
     
-    # Очищаем все откаты
     await db.pool.execute('DELETE FROM rollbacks WHERE list_id = $1', list_id)
     
     await inter.response.send_message(f"✅ Все откаты в списке '{list_data['name']}' сброшены!", ephemeral=True)
     
-    # Обновляем сообщения
     channel = bot.get_channel(list_data["channel_id"])
     if channel:
         await update_participants_message(channel, list_data)
@@ -992,7 +879,6 @@ async def list_all(inter: disnake.ApplicationCommandInteraction):
     embed = disnake.Embed(title="📋 Все списки", color=0x2b2d31)
     
     for row in rows:
-        # Получаем количество участников и откатов
         participants_count = await db.pool.fetchval(
             'SELECT COUNT(*) FROM participants WHERE list_id = $1', row['id']
         )
@@ -1009,7 +895,6 @@ async def list_all(inter: disnake.ApplicationCommandInteraction):
     await inter.response.send_message(embed=embed, ephemeral=True)
 
 async def main():
-    """Основная функция запуска"""
     max_retries = 3
     retry_delay = 5
     
