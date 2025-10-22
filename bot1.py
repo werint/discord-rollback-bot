@@ -193,13 +193,16 @@ async def create_new_list(list_id, list_name, channel_id, created_by, guild_id):
     
     return list_data
 
-async def get_list(list_id, guild_id):
+async def get_list(list_id, guild_id, update_active=True):
     """Получает список по ID для указанного сервера"""
     row = await db.pool.fetchrow('''
         SELECT * FROM lists WHERE id = $1 AND guild_id = $2
     ''', list_id, guild_id)
     
     if not row:
+        # Если список не найден, удаляем из активных
+        if list_id in active_lists:
+            del active_lists[list_id]
         return None
     
     # Получаем участников
@@ -244,7 +247,8 @@ async def get_list(list_id, guild_id):
     }
     
     # Обновляем в активных списках
-    active_lists[list_id] = list_data
+    if update_active:
+        active_lists[list_id] = list_data
     
     return list_data
 
@@ -284,11 +288,12 @@ async def update_status_message(list_data):
         if not channel:
             return
         
-        # Получаем актуальные данные из базы
-        list_data = await get_list(list_data["id"], list_data["guild_id"])
+        # Получаем актуальные данные из базы (ВКЛЮЧАЯ участников)
+        list_data = await get_list(list_data["id"], list_data["guild_id"], update_active=True)
         if not list_data:
             return
         
+        # Остальной код без изменений...
         # Формируем содержимое сообщения
         total_participants = len(list_data['participants'])
         completed_rollbacks = sum(1 for p in list_data['participants'].values() if p['has_rollback'])
@@ -348,6 +353,11 @@ async def update_participants_message(channel, list_data):
     if not list_data:
         return
     
+    # Получаем актуальные данные из базы (ВКЛЮЧАЯ участников)
+    list_data = await get_list(list_data["id"], list_data["guild_id"], update_active=True)
+    if not list_data:
+        return
+    
     if list_data.get("message_id"):
         try:
             message = await channel.fetch_message(list_data["message_id"])
@@ -398,37 +408,77 @@ async def generate_participants_list(list_data):
     return "\n".join(lines)
 
 # Задача для автоматического обновления
-@tasks.loop(seconds=30)
-async def auto_update_lists():
-    """Автоматическое обновление всех активных списков каждые 30 секунд"""
+async def update_status_message(list_data):
+    """Обновляет сообщение со статусом откатов в СТАТИЧЕСКОМ канале"""
     try:
-        print(f"🔄 Авто-обновление списков... ({len(active_lists)} активных списков)")
+        config = get_server_config(list_data["guild_id"])
+        if not config:
+            return
+            
+        channel_id = config["static_channel_id"]
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            return
         
-        for list_id, list_data in list(active_lists.items()):
+        # Получаем актуальные данные из базы (ВКЛЮЧАЯ участников)
+        list_data = await get_list(list_data["id"], list_data["guild_id"], update_active=True)
+        if not list_data:
+            return
+        
+        # Остальной код без изменений...
+        # Формируем содержимое сообщения
+        total_participants = len(list_data['participants'])
+        completed_rollbacks = sum(1 for p in list_data['participants'].values() if p['has_rollback'])
+        
+        message_content = f"📊 **СТАТУС ОТКАТОВ: {list_data['name']}**\n\n"
+        message_content += f"📋 ID списка: `{list_data['id']}`\n"
+        message_content += f"👥 Всего участников: **{total_participants}**\n"
+        message_content += f"✅ Отправили откат: **{completed_rollbacks}** / **{total_participants}**\n"
+        message_content += f"{'='*50}\n\n"
+        
+        if not list_data['participants']:
+            message_content += "*Список участников пуст*\n"
+        else:
+            for user_id, participant in sorted(list_data['participants'].items(), key=lambda x: x[1]['registered_at']):
+                status = "🟢" if participant['has_rollback'] else "🔴"
+                username = participant['display_name']
+                message_content += f"{status} **{username}**\n"
+                
+                if participant['has_rollback']:
+                    user_rollback = None
+                    for rollback in list_data['rollbacks'].values():
+                        if rollback['user_id'] == user_id:
+                            user_rollback = rollback
+                            break
+                    if user_rollback:
+                        rollback_text = user_rollback['text']
+                        if rollback_text:
+                            rollback_preview = rollback_text[:150]
+                            if len(rollback_text) > 150:
+                                rollback_preview += "..."
+                            message_content += f"  └ 📝 {rollback_preview}\n"
+                message_content += "\n"
+        
+        # Проверяем, есть ли уже сообщение со статусом
+        status_message_id = list_data.get("status_message_id")
+        
+        if status_message_id:
             try:
-                # Обновляем данные из базы
-                current_list_data = await get_list(list_id, list_data["guild_id"])
-                if not current_list_data:
-                    # Если список удален, убираем из активных
-                    del active_lists[list_id]
-                    continue
-                
-                # Обновляем оба сообщения
-                channel = bot.get_channel(current_list_data["channel_id"])
-                if channel:
-                    await update_participants_message(channel, current_list_data)
-                
-                await update_status_message(current_list_data)
-                
-                print(f"✅ Обновлен список: {list_id}")
-                
-            except Exception as e:
-                print(f"❌ Ошибка при авто-обновлении списка {list_id}: {e}")
+                status_message = await channel.fetch_message(status_message_id)
+                await status_message.edit(content=message_content)
+                return
+            except:
+                pass
         
-        print(f"✅ Авто-обновление завершено")
+        # Создаём новое сообщение
+        new_message = await channel.send(message_content)
+        
+        await db.pool.execute('''
+            UPDATE lists SET status_message_id = $1 WHERE id = $2
+        ''', new_message.id, list_data["id"])
         
     except Exception as e:
-        print(f"❌ Критическая ошибка в auto_update_lists: {e}")
+        print(f"Ошибка при обновлении статуса списка {list_data['id']}: {e}")
 
 @bot.event
 async def on_ready():
