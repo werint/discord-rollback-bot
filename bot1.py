@@ -37,13 +37,11 @@ class Database:
     
     async def get_database_url(self):
         """Получает URL базы данных из переменных окружения"""
-        # Пробуем разные варианты имени переменной
         database_url = os.getenv('DATABASE_URL')
         if database_url:
             print("✅ DATABASE_URL найден")
             return database_url
             
-        # Пробуем другие возможные имена переменных
         database_url = os.getenv('POSTGRES_URL')
         if database_url:
             print("✅ POSTGRES_URL найден")
@@ -54,7 +52,6 @@ class Database:
             print("✅ POSTGRESQL_URL найден")
             return database_url
             
-        # Если не нашли, выводим все доступные переменные для отладки
         print("🔍 Доступные переменные окружения:")
         for key, value in os.environ.items():
             if any(db_key in key.lower() for db_key in ['database', 'postgres', 'pg']):
@@ -70,7 +67,6 @@ class Database:
         
         print(f"🔗 Подключаемся к базе данных...")
         
-        # Форматируем URL для asyncpg
         if database_url.startswith('postgres://'):
             database_url = database_url.replace('postgres://', 'postgresql://', 1)
         
@@ -135,6 +131,9 @@ class Database:
 
 db = Database()
 
+# Глобальная переменная для хранения активных списков
+active_lists = {}
+
 def get_server_config(guild_id):
     """Получает конфигурацию для сервера"""
     return SERVER_CONFIGS.get(guild_id)
@@ -178,7 +177,7 @@ async def create_new_list(list_id, list_name, channel_id, created_by, guild_id):
         VALUES ($1, $2, $3, $4, $5, $6)
     ''', list_id, list_name, channel_id, static_channel_id, created_by, guild_id)
     
-    return {
+    list_data = {
         "id": list_id,
         "name": list_name,
         "channel_id": channel_id,
@@ -188,6 +187,11 @@ async def create_new_list(list_id, list_name, channel_id, created_by, guild_id):
         "participants": {},
         "rollbacks": {}
     }
+    
+    # Добавляем в активные списки для авто-обновления
+    active_lists[list_id] = list_data
+    
+    return list_data
 
 async def get_list(list_id, guild_id):
     """Получает список по ID для указанного сервера"""
@@ -225,7 +229,7 @@ async def get_list(list_id, guild_id):
             "timestamp": r['timestamp'].isoformat()
         }
     
-    return {
+    list_data = {
         "id": row['id'],
         "name": row['name'],
         "channel_id": row['channel_id'],
@@ -238,15 +242,18 @@ async def get_list(list_id, guild_id):
         "participants": participants,
         "rollbacks": rollbacks
     }
+    
+    # Обновляем в активных списках
+    active_lists[list_id] = list_data
+    
+    return list_data
 
 async def remove_user_rollback(list_data, user_id):
     """Удаляет откат пользователя"""
-    # Удаляем откат
     await db.pool.execute('''
         DELETE FROM rollbacks WHERE list_id = $1 AND user_id = $2
     ''', list_data["id"], user_id)
     
-    # Обновляем статус участника
     await db.pool.execute('''
         UPDATE participants SET has_rollback = FALSE 
         WHERE list_id = $1 AND user_id = $2
@@ -259,10 +266,7 @@ def clean_rollback_text(text):
     if not text:
         return ""
     
-    # Удаляем HTML-теги
     clean_text = re.sub(r'<[^>]+>', '', text)
-    
-    # Убираем лишние пробелы
     clean_text = re.sub(r'\s+', ' ', clean_text)
     clean_text = clean_text.strip()
     
@@ -327,19 +331,126 @@ async def update_status_message(list_data):
                 await status_message.edit(content=message_content)
                 return
             except:
-                # Сообщение не найдено, создадим новое
                 pass
         
         # Создаём новое сообщение
         new_message = await channel.send(message_content)
         
-        # Сохраняем ID сообщения в базу
         await db.pool.execute('''
             UPDATE lists SET status_message_id = $1 WHERE id = $2
         ''', new_message.id, list_data["id"])
         
     except Exception as e:
         print(f"Ошибка при обновлении статуса списка {list_data['id']}: {e}")
+
+async def update_participants_message(channel, list_data):
+    """Обновляет сообщение со списком участников и кнопками в канале списка"""
+    if not list_data:
+        return
+    
+    if list_data.get("message_id"):
+        try:
+            message = await channel.fetch_message(list_data["message_id"])
+            embed = disnake.Embed(
+                title=f"📋 {list_data['name']}",
+                description=await generate_participants_list(list_data),
+                color=0x2b2d31
+            )
+            embed.set_footer(text=f"ID: {list_data['id']} | Регистрация через администратора")
+            
+            view = MainView(list_data["id"], list_data["guild_id"])
+            await message.edit(embed=embed, view=view)
+            return
+        except:
+            pass
+    
+    # Создаём новое сообщение
+    embed = disnake.Embed(
+        title=f"📋 {list_data['name']}",
+        description=await generate_participants_list(list_data),
+        color=0x2b2d31
+    )
+    embed.set_footer(text=f"ID: {list_data['id']} | Регистрация через администратора")
+    
+    view = MainView(list_data["id"], list_data["guild_id"])
+    message = await channel.send(embed=embed, view=view)
+    
+    await db.pool.execute('''
+        UPDATE lists SET message_id = $1 WHERE id = $2
+    ''', message.id, list_data["id"])
+
+async def generate_participants_list(list_data):
+    if not list_data or not list_data["participants"]:
+        return "*Список участников пуст*"
+    
+    participants = list_data["participants"]
+    sorted_participants = sorted(
+        participants.items(), 
+        key=lambda x: x[1]["registered_at"]
+    )
+    
+    lines = []
+    for user_id, info in sorted_participants:
+        status = "✅" if info["has_rollback"] else "❌"
+        mention = f"<@{user_id}>"
+        lines.append(f"{status} {mention}")
+    
+    return "\n".join(lines)
+
+# Задача для автоматического обновления
+@tasks.loop(seconds=30)
+async def auto_update_lists():
+    """Автоматическое обновление всех активных списков каждые 30 секунд"""
+    try:
+        print(f"🔄 Авто-обновление списков... ({len(active_lists)} активных списков)")
+        
+        for list_id, list_data in list(active_lists.items()):
+            try:
+                # Обновляем данные из базы
+                current_list_data = await get_list(list_id, list_data["guild_id"])
+                if not current_list_data:
+                    # Если список удален, убираем из активных
+                    del active_lists[list_id]
+                    continue
+                
+                # Обновляем оба сообщения
+                channel = bot.get_channel(current_list_data["channel_id"])
+                if channel:
+                    await update_participants_message(channel, current_list_data)
+                
+                await update_status_message(current_list_data)
+                
+                print(f"✅ Обновлен список: {list_id}")
+                
+            except Exception as e:
+                print(f"❌ Ошибка при авто-обновлении списка {list_id}: {e}")
+        
+        print(f"✅ Авто-обновление завершено")
+        
+    except Exception as e:
+        print(f"❌ Критическая ошибка в auto_update_lists: {e}")
+
+@bot.event
+async def on_ready():
+    print(f'Bot {bot.user} готов к работе!')
+    print(f'Подключен к {len(bot.guilds)} серверам')
+    
+    # Загружаем все существующие списки в активные
+    try:
+        for guild in bot.guilds:
+            rows = await db.pool.fetch('SELECT id FROM lists WHERE guild_id = $1', guild.id)
+            for row in rows:
+                list_data = await get_list(row['id'], guild.id)
+                if list_data:
+                    active_lists[list_data["id"]] = list_data
+                    print(f"📋 Загружен активный список: {list_data['id']}")
+    except Exception as e:
+        print(f"❌ Ошибка при загрузке активных списков: {e}")
+    
+    # Запускаем авто-обновление
+    auto_update_lists.start()
+    print("✅ Авто-обновление списков запущено (каждые 30 секунд)")
+    print("✅ Бот запущен и готов к работе!")
 
 class CreateListModal(disnake.ui.Modal):
     def __init__(self, guild_id):
@@ -386,19 +497,15 @@ class CreateListModal(disnake.ui.Modal):
         name_value = inter.text_values["name"].strip()
         server_value = inter.text_values["event_server"].strip()
         
-        # Генерируем уникальный 5-символьный ID
         list_id = generate_list_id()
         
-        # Проверяем уникальность ID
         existing = await db.pool.fetchrow('SELECT id FROM lists WHERE id = $1', list_id)
         while existing:
             list_id = generate_list_id()
             existing = await db.pool.fetchrow('SELECT id FROM lists WHERE id = $1', list_id)
         
-        # Создаём полное название
         full_name = f"{time_value} | {date_value} | {name_value} | {server_value}"
         
-        # Создаём список
         list_data = await create_new_list(list_id, full_name, inter.channel_id, str(inter.author.id), self.guild_id)
         
         config = get_server_config(self.guild_id)
@@ -415,7 +522,6 @@ class CreateListModal(disnake.ui.Modal):
             ephemeral=True
         )
         
-        # Создаем сообщения:
         await update_participants_message(inter.channel, list_data)
         await update_status_message(list_data)
 
@@ -550,61 +656,6 @@ class DeleteRollbackView(disnake.ui.View):
         await inter.response.send_message("❌ Удаление отката отменено.", ephemeral=True)
         await inter.message.delete()
 
-async def update_participants_message(channel, list_data):
-    """Обновляет сообщение со списком участников и кнопками в канале списка"""
-    if not list_data:
-        return
-    
-    if list_data.get("message_id"):
-        try:
-            message = await channel.fetch_message(list_data["message_id"])
-            embed = disnake.Embed(
-                title=f"📋 {list_data['name']}",
-                description=await generate_participants_list(list_data),
-                color=0x2b2d31
-            )
-            embed.set_footer(text=f"ID: {list_data['id']} | Регистрация через администратора")
-            
-            view = MainView(list_data["id"], list_data["guild_id"])
-            await message.edit(embed=embed, view=view)
-            return
-        except:
-            pass
-    
-    # Создаём новое сообщение
-    embed = disnake.Embed(
-        title=f"📋 {list_data['name']}",
-        description=await generate_participants_list(list_data),
-        color=0x2b2d31
-    )
-    embed.set_footer(text=f"ID: {list_data['id']} | Регистрация через администратора")
-    
-    view = MainView(list_data["id"], list_data["guild_id"])
-    message = await channel.send(embed=embed, view=view)
-    
-    # Сохраняем ID сообщения в базу
-    await db.pool.execute('''
-        UPDATE lists SET message_id = $1 WHERE id = $2
-    ''', message.id, list_data["id"])
-
-async def generate_participants_list(list_data):
-    if not list_data or not list_data["participants"]:
-        return "*Список участников пуст*"
-    
-    participants = list_data["participants"]
-    sorted_participants = sorted(
-        participants.items(), 
-        key=lambda x: x[1]["registered_at"]
-    )
-    
-    lines = []
-    for user_id, info in sorted_participants:
-        status = "✅" if info["has_rollback"] else "❌"
-        mention = f"<@{user_id}>"
-        lines.append(f"{status} {mention}")
-    
-    return "\n".join(lines)
-
 class MainView(disnake.ui.View):
     def __init__(self, list_id, guild_id):
         super().__init__(timeout=None)
@@ -663,7 +714,7 @@ class MainView(disnake.ui.View):
         else:
             await inter.response.send_modal(RollbackModal(self.list_id, self.guild_id, has_existing_rollback=False))
     
-    @disnake.ui.button(label="Обновить список", style=disnake.ButtonStyle.secondary)
+     @disnake.ui.button(label="Обновить список", style=disnake.ButtonStyle.secondary)
     async def refresh_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         await inter.response.defer(ephemeral=True)
         list_data = await get_list(self.list_id, self.guild_id)
@@ -676,16 +727,6 @@ class MainView(disnake.ui.View):
             await update_participants_message(channel, list_data)
         await update_status_message(list_data)
         await inter.edit_original_response(content="✅ Оба списка обновлены!")
-
-@bot.event
-async def on_ready():
-    print(f'Bot {bot.user} готов к работе!')
-    print(f'Подключен к {len(bot.guilds)} серверам')
-    print("Поддерживаемые серверы:")
-    for guild_id, config in SERVER_CONFIGS.items():
-        print(f"- Сервер {guild_id}")
-    
-    print("✅ Бот запущен и готов к работе!")
 
 @bot.slash_command(description="Создать новый список откатов")
 async def create_list(inter: disnake.ApplicationCommandInteraction):
@@ -849,6 +890,10 @@ async def delete_list(
     
     # Удаляем список (каскадно удалятся участники и откаты)
     await db.pool.execute('DELETE FROM lists WHERE id = $1', list_id)
+    
+    # Удаляем из активных списков
+    if list_id in active_lists:
+        del active_lists[list_id]
     
     await inter.response.send_message(f"✅ Список '{list_data['name']}' (ID: {list_id}) полностью удален!", ephemeral=True)
 
