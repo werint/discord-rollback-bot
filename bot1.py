@@ -35,61 +35,103 @@ class Database:
     def __init__(self):
         self.pool = None
     
+    async def get_database_url(self):
+        """Получает URL базы данных из переменных окружения"""
+        # Пробуем разные варианты имени переменной
+        database_url = os.getenv('DATABASE_URL')
+        if database_url:
+            print("✅ DATABASE_URL найден")
+            return database_url
+            
+        # Пробуем другие возможные имена переменных
+        database_url = os.getenv('POSTGRES_URL')
+        if database_url:
+            print("✅ POSTGRES_URL найден")
+            return database_url
+            
+        database_url = os.getenv('POSTGRESQL_URL')
+        if database_url:
+            print("✅ POSTGRESQL_URL найден")
+            return database_url
+            
+        # Если не нашли, выводим все доступные переменные для отладки
+        print("🔍 Доступные переменные окружения:")
+        for key, value in os.environ.items():
+            if any(db_key in key.lower() for db_key in ['database', 'postgres', 'pg']):
+                print(f"   {key}: {value[:50]}...")
+        
+        return None
+    
     async def connect(self):
         """Подключение к PostgreSQL"""
-        database_url = os.getenv('DATABASE_URL')
+        database_url = await self.get_database_url()
         if not database_url:
-            raise Exception("DATABASE_URL не найден в переменных окружения")
+            raise Exception("❌ DATABASE_URL не найден в переменных окружения!")
+        
+        print(f"🔗 Подключаемся к базе данных...")
         
         # Форматируем URL для asyncpg
         if database_url.startswith('postgres://'):
             database_url = database_url.replace('postgres://', 'postgresql://', 1)
         
-        self.pool = await asyncpg.create_pool(database_url)
-        await self.init_tables()
-        print("✅ Подключение к базе данных установлено")
+        try:
+            self.pool = await asyncpg.create_pool(
+                database_url,
+                min_size=1,
+                max_size=10,
+                command_timeout=60
+            )
+            await self.init_tables()
+            print("✅ Подключение к базе данных установлено")
+        except Exception as e:
+            print(f"❌ Ошибка подключения к базе: {e}")
+            raise
     
     async def init_tables(self):
         """Инициализация таблиц"""
-        await self.pool.execute('''
-            CREATE TABLE IF NOT EXISTS lists (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                channel_id BIGINT NOT NULL,
-                static_channel_id BIGINT NOT NULL,
-                created_by TEXT NOT NULL,
-                guild_id BIGINT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW(),
-                message_id BIGINT,
-                status_message_id BIGINT
-            )
-        ''')
-        
-        await self.pool.execute('''
-            CREATE TABLE IF NOT EXISTS participants (
-                user_id TEXT NOT NULL,
-                list_id TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                has_rollback BOOLEAN DEFAULT FALSE,
-                registered_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (user_id, list_id),
-                FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE CASCADE
-            )
-        ''')
-        
-        await self.pool.execute('''
-            CREATE TABLE IF NOT EXISTS rollbacks (
-                timestamp TIMESTAMP DEFAULT NOW(),
-                user_id TEXT NOT NULL,
-                list_id TEXT NOT NULL,
-                user_name TEXT NOT NULL,
-                text TEXT NOT NULL,
-                PRIMARY KEY (user_id, list_id),
-                FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE CASCADE
-            )
-        ''')
-        
-        print("✅ Таблицы инициализированы")
+        try:
+            await self.pool.execute('''
+                CREATE TABLE IF NOT EXISTS lists (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    channel_id BIGINT NOT NULL,
+                    static_channel_id BIGINT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    message_id BIGINT,
+                    status_message_id BIGINT
+                )
+            ''')
+            
+            await self.pool.execute('''
+                CREATE TABLE IF NOT EXISTS participants (
+                    user_id TEXT NOT NULL,
+                    list_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    has_rollback BOOLEAN DEFAULT FALSE,
+                    registered_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (user_id, list_id),
+                    FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE CASCADE
+                )
+            ''')
+            
+            await self.pool.execute('''
+                CREATE TABLE IF NOT EXISTS rollbacks (
+                    timestamp TIMESTAMP DEFAULT NOW(),
+                    user_id TEXT NOT NULL,
+                    list_id TEXT NOT NULL,
+                    user_name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY (user_id, list_id),
+                    FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE CASCADE
+                )
+            ''')
+            
+            print("✅ Таблицы инициализированы")
+        except Exception as e:
+            print(f"❌ Ошибка инициализации таблиц: {e}")
+            raise
 
 db = Database()
 
@@ -873,13 +915,30 @@ async def list_all(inter: disnake.ApplicationCommandInteraction):
 
 async def main():
     """Основная функция запуска"""
-    await db.connect()
-    await bot.start(os.getenv('DISCORD_BOT_TOKEN'))
-
-if __name__ == "__main__":
+    max_retries = 3
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 Попытка подключения к базе данных {attempt + 1}/{max_retries}...")
+            await db.connect()
+            break
+        except Exception as e:
+            print(f"❌ Попытка {attempt + 1} не удалась: {e}")
+            if attempt < max_retries - 1:
+                print(f"⏳ Ждем {retry_delay} секунд перед следующей попыткой...")
+                await asyncio.sleep(retry_delay)
+            else:
+                print("❌ Все попытки подключения провалились!")
+                raise
+    
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
-        print("❌ DISCORD_BOT_TOKEN не найден в переменных окружения")
+        print("❌ DISCORD_BOT_TOKEN не найден!")
         exit(1)
     
+    print("🚀 Запускаем бота...")
+    await bot.start(token)
+
+if __name__ == "__main__":
     asyncio.run(main())
